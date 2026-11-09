@@ -1,6 +1,6 @@
 # Public Release Design
 
-Status: approved by the repository owner on 2026-11-09.
+Status: initial release approved by the repository owner on 2026-11-09; expanded package approved after the owner requested the full update.
 
 ## Goal
 
@@ -9,10 +9,12 @@ Publish Novel Master Lab as a standalone Codex skill for Chinese serialized fict
 ## Package
 
 - `SKILL.md`: complete controller for project intake, planning, chapter drafting, three-pass revision, candidate-to-canon approval, and periodic review.
-- `references/project-bootstrap.md`: roles of the five lightweight planning files and how to handle existing projects.
-- `references/long-form-continuity.md`: source validity, scoped chapter briefs, moving state, evidence checks, and chapter handoff.
+- `references/`: planning, chapter craft, source validity, scoped briefs, optional structured state, and separate literary/factual review.
 - `agents/openai.yaml`: Codex discovery metadata.
-- `README.md`: Chinese introduction, features, installation, usage, deliverables, limitations, and validation status.
+- `templates/`: five new-project planning documents, chapter and review forms, and empty JSON state files.
+- `scripts/nml.py`: dependency-free, read-only-by-default state checks and an explicit, backed-up approval operation.
+- `tests/` and `.github/workflows/test.yml`: synthetic regression coverage on supported Python versions.
+- `README.md`: concise Chinese purpose, workflow, installation, usage, and output.
 
 No novel manuscript, first-chapter trial, private evaluation report, local absolute path, token, or secret is part of this public package. No license is selected in this release.
 
@@ -22,4 +24,4 @@ The skill is one writing controller, not a separate CLI or a guaranteed quality 
 
 ## Verification
 
-Run Codex's `quick_validate.py`, inspect the published tree for private material, compare the installed and published copies, verify a clean git state, then confirm the public GitHub URL and rendered README. A one-chapter pilot is exploratory evidence only, not proof of repeatable 8.2+ literary quality.
+Run Codex's `quick_validate.py`, run the Python regression suite, inspect the published tree for private material, compare the installed and published copies, verify a clean git state, then confirm the public GitHub URL and CI. A one-chapter pilot is exploratory evidence only, not proof of repeatable 8.2+ literary quality.

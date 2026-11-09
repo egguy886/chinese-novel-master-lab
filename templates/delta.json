@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "chapter": 0,
+  "mode": "continue",
+  "status": "candidate",
+  "chapter_file": "",
+  "chapter_sha256": "",
+  "state_sha256": "",
+  "story_day": 0,
+  "flashback": false,
+  "summary": "",
+  "new_entities": {
+    "characters": {},
+    "locations": {},
+    "relationships": {},
+    "props": {},
+    "knowledge": {},
+    "threads": {}
+  },
+  "character_changes": [],
+  "relationship_changes": [],
+  "prop_changes": [],
+  "knowledge_changes": [],
+  "thread_changes": [],
+  "promise_open": [],
+  "promise_payoff": [],
+  "new_canon_requests": []
+}

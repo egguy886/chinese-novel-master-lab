@@ -13,6 +13,8 @@
 5. 写后记录候选状态变化；用户批准前，不自动并入正式正典。
 6. 长篇或高风险章节按来源证据检查状态、时间、物件流转、人物知识和章尾承诺。
 
+需要结构化状态账本时，可选用仓库自带的 Python 3.10+ 工具；普通单章写作不必启用。工具只负责可确定的结构检查，不能替代读正文和文学审稿。
+
 ## 安装
 
 ```bash
@@ -33,6 +35,16 @@ $chinese-novel-master-lab 帮我建立一部中文长篇小说的前期设定，
 ```text
 $chinese-novel-master-lab 检查现有正文和人物状态，继续写下一章；先列本章必须遵守的事实，再给出正文与候选状态变化。
 ```
+
+可选状态工具的顺序是 `init` → 写章 → `prepare` → 填候选增量 → `check` → 用户批准后 `approve`：
+
+```bash
+python3 scripts/nml.py init /path/to/book --new-project
+python3 scripts/nml.py prepare /path/to/book 章节草稿/001_章节名.md --chapter 1
+python3 scripts/nml.py check /path/to/book --delta /path/to/book/.novel-master-lab/deltas/ch-001.json
+```
+
+`approve` 会改动项目账本，必须先得到用户对章节和候选变化的明确批准。具体数据格式见 `references/project-state.md`。
 
 ## 产出
 

@@ -2,6 +2,8 @@
 
 Use this when starting a new Chinese serialized-fiction project or when an existing project lacks enough structure to proceed. These are document roles, not mandatory forms. Keep them short enough to remain useful during drafting.
 
+The `templates/new-project/` directory contains short starting documents. `python3 scripts/nml.py init PROJECT --new-project` adds only missing files; it never overwrites existing project plans. The structured ledger is optional and may be initialized later.
+
 ## 00 - Creative Constitution
 
 Record the reader promise, genre and tone, priority order, character boundaries, and any hard content or world constraints. Separate non-negotiable decisions from preferences that can change.
