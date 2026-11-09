@@ -1,7 +1,7 @@
 ---
 name: chinese-novel-master-lab
 description: >-
-  Experimental Codex skill for planning and writing Chinese serialized fiction. Use for new projects, chapter drafting, continuation, or rewrites when natural prose and long-form continuity both matter. Keeps state checks backstage and approved canon separate from draft changes; does not guarantee a literary score.
+  Plan, draft, continue, and rewrite Chinese serialized fiction (中文网文、长篇小说) with natural prose and evidence-backed continuity. Use for new projects, chapter writing, or continuity-sensitive rewrites; keep draft changes separate from approved canon.
 ---
 
 # Chinese Novel Master Lab
@@ -60,7 +60,9 @@ Do not compress away a binding detail. Keep source anchors and audit reasoning s
 
 For a long-running project, high-risk rewrite, or explicit continuity request, read [long-form continuity](references/long-form-continuity.md). For a short, self-contained chapter, apply the same judgment without creating a ledger merely for ceremony.
 
-The optional [project state contract](references/project-state.md) and `scripts/nml.py` provide a small, read-only-by-default ledger for projects that need repeatable checks. They are not required for a single chapter, and script output never substitutes for reading the prose.
+The optional [project state contract](references/project-state.md) and `scripts/nml.py` provide a small ledger for projects that need repeatable checks. `check` is read-only; `init` and `prepare` create files, while `approve` updates approved state only after explicit user approval. A single chapter does not require the ledger, and script output never substitutes for reading the prose.
+
+Resolve supporting files relative to this `SKILL.md`. When working inside a novel project, invoke `scripts/nml.py` through the installed skill's absolute path; do not assume the current directory is the skill folder.
 
 ## Chapter Production
 
