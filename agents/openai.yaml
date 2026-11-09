@@ -1,0 +1,4 @@
+interface:
+  display_name: "Chinese Novel Master Lab"
+  short_description: "Chinese serialized fiction planning and continuity"
+  default_prompt: "Use $chinese-novel-master-lab to plan or write one Chinese novel chapter with long-form continuity checks."
