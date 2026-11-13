@@ -355,5 +355,147 @@ class LedgerTests(unittest.TestCase):
         self.assertIn("no recorded payoff", message)
 
 
+
+class FinalCheckTests(unittest.TestCase):
+    CLEAN = (
+        "# 第六章 引水人\n\n"
+        "雾从门缝里挤进来，漫过她的靴面。\n\n"
+        "“起锚。”龙婆说。\n\n"
+        "船靠上码头，牙行的人踩着跳板上来。\n\n"
+        "“干娘说了，货要验，人也要验。”\n"
+    )
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def chapter(self, text: str, name: str = "006.md") -> Path:
+        path = self.root / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def run_cli(self, *args: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            code = nml.main(list(args))
+        return code, output.getvalue()
+
+    def test_clean_chapter_passes_and_is_read_only(self) -> None:
+        path = self.chapter(self.CLEAN)
+        before = sorted(p.name for p in self.root.iterdir())
+        code, message = self.run_cli(
+            "final-check", str(path), "--hook", "干娘说了,人也要验", "--catch", "雾"
+        )
+        self.assertEqual(code, 0, message)
+        self.assertIn("0 error(s), 0 warning(s)", message)
+        self.assertEqual(before, sorted(p.name for p in self.root.iterdir()))
+        self.assertEqual(path.read_text(encoding="utf-8"), self.CLEAN)
+
+    def test_straight_quotes_are_errors(self) -> None:
+        path = self.chapter(self.CLEAN.replace("“", '"').replace("”", '"'))
+        code, message = self.run_cli("final-check", str(path))
+        self.assertEqual(code, 1, message)
+        self.assertIn("straight double quotes", message)
+
+    def test_unclosed_quote_is_error(self) -> None:
+        path = self.chapter("# 第一章\n\n“你来了。\n\n她没回头。\n")
+        code, message = self.run_cli("final-check", str(path))
+        self.assertEqual(code, 1, message)
+        self.assertIn("not closed", message)
+
+    def test_cross_paragraph_dialogue_is_allowed(self) -> None:
+        path = self.chapter("# 第一章\n\n“你来了。\n\n“坐吧。”\n")
+        code, message = self.run_cli("final-check", str(path))
+        self.assertEqual(code, 0, message)
+
+    def test_stock_phrase_is_error_and_narration_rule_skips_dialogue(self) -> None:
+        path = self.chapter("# 第一章\n\n她不禁笑了。\n\n“仿佛见过你。”他说。\n")
+        code, message = self.run_cli("final-check", str(path))
+        self.assertEqual(code, 1, message)
+        self.assertIn("不禁", message)
+        self.assertNotIn("仿佛", message)
+
+    def test_window_limit_ignores_old_chapters_when_current_is_clean(self) -> None:
+        old = [self.chapter(f"# 旧章\n\n他嘴角微微勾起。\n", f"00{i}.md") for i in range(1, 4)]
+        clean = self.chapter("# 第四章\n\n他没笑。\n", "004.md")
+        code, message = self.run_cli("final-check", str(clean), "--previous", *map(str, old))
+        self.assertEqual(code, 0, message)
+        dirty = self.chapter("# 第五章\n\n他嘴角勾起。\n", "005.md")
+        code, message = self.run_cli("final-check", str(dirty), "--previous", *map(str, old))
+        self.assertEqual(code, 1, message)
+        self.assertIn("嘴角勾起", message)
+        self.assertIn("last 50 chapter", message)
+
+    def test_summary_ending_is_error(self) -> None:
+        path = self.chapter("# 第一章\n\n门开了。\n\n一切才刚刚开始。\n")
+        code, message = self.run_cli("final-check", str(path))
+        self.assertEqual(code, 1, message)
+        self.assertIn("[ending]", message)
+
+    def test_hook_and_catch_must_land(self) -> None:
+        path = self.chapter(self.CLEAN)
+        code, message = self.run_cli("final-check", str(path), "--hook", "秤钩", "--catch", "风暴")
+        self.assertEqual(code, 1, message)
+        self.assertIn("[hook]", message)
+        self.assertIn("[catch]", message)
+
+    def test_meta_text_warns_without_blocking(self) -> None:
+        path = self.chapter("# 第一章\n\n本章伏笔：残牌。\n\n她收好残牌。\n")
+        code, message = self.run_cli("final-check", str(path))
+        self.assertEqual(code, 0, message)
+        self.assertIn("[meta]", message)
+
+    def test_project_config_sets_length_and_book_rules(self) -> None:
+        project = self.root / "book"
+        (project / ".novel-master-lab").mkdir(parents=True)
+        (project / ".novel-master-lab" / "final-check.json").write_text(
+            json.dumps({
+                "length": {"min": 100, "max": 200, "tolerance": 0.1},
+                "extra_banned": [{"term": "冷笑", "max": 0}],
+                "disable_banned": ["不禁"],
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        path = self.chapter("# 第一章\n\n她不禁冷笑。\n")
+        code, message = self.run_cli("final-check", str(path), "--project", str(project))
+        self.assertEqual(code, 1, message)
+        self.assertIn("冷笑", message)
+        self.assertNotIn("不禁", message)
+        self.assertIn("below minimum 100", message)
+
+    def test_unknown_config_key_is_rejected(self) -> None:
+        config = self.root / "bad.json"
+        config.write_text('{"quote": "none"}', encoding="utf-8")
+        path = self.chapter(self.CLEAN)
+        code, message = self.run_cli("final-check", str(path), "--config", str(config))
+        self.assertEqual(code, 2, message)
+        self.assertIn("Unknown final-check config key", message)
+
+    def test_corner_quote_mode(self) -> None:
+        config = self.root / "corner.json"
+        config.write_text('{"quotes": "corner"}', encoding="utf-8")
+        good = self.chapter("# 第一章\n\n「起锚。」龙婆说。\n")
+        code, message = self.run_cli("final-check", str(good), "--config", str(config))
+        self.assertEqual(code, 0, message)
+        bad = self.chapter(self.CLEAN, "007.md")
+        code, message = self.run_cli("final-check", str(bad), "--config", str(config))
+        self.assertEqual(code, 1, message)
+        self.assertIn("other quote style", message)
+
+    def test_retired_name_warns_when_project_ledger_exists(self) -> None:
+        project = self.root / "book"
+        project.mkdir()
+        self.assertEqual(self.run_cli("init", str(project))[0], 0)
+        state_path = project / ".novel-master-lab" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["characters"]["hero"] = {"name": "阿奴", "aliases": [], "deprecated_names": ["阿狗"]}
+        state_path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        path = self.chapter("# 第一章\n\n阿狗低下头。\n")
+        code, message = self.run_cli("final-check", str(path), "--project", str(project))
+        self.assertEqual(code, 0, message)
+        self.assertIn("阿狗", message)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,6 @@
+{
+  "quotes": "cn_curly",
+  "length": {"min": 3000, "max": 3800, "tolerance": 0.15},
+  "extra_banned": [],
+  "disable_banned": []
+}

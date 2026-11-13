@@ -20,6 +20,16 @@ Chapter: . Candidate hash: . Reviewer/context: .
 | --- | --- | --- | --- |
 | | | | |
 
+## Final Check
+
+- Script result (errors / warnings):
+- Ending hook type and strength (1–5):
+- Planned hook words landed: yes / no / not planned
+
+| Finding | Repair (before → after) or reason kept |
+| --- | --- |
+| | |
+
 ## Approval
 
 - Text approved by user: no
