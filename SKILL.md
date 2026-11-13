@@ -1,7 +1,7 @@
 ---
 name: chinese-novel-master-lab
 description: >-
-  Plan, draft, continue, and rewrite Chinese serialized fiction (中文网文、长篇小说) with natural prose and evidence-backed continuity. Use for new projects, chapter writing, or continuity-sensitive rewrites; keep draft changes separate from approved canon.
+  Plan, draft, continue, and rewrite Chinese serialized fiction (中文网文、长篇小说) with natural prose, evidence-backed continuity, and a read-only final check (终检) for quotes, stock phrases, endings, and hook landing. Use for new projects, chapter writing, or continuity-sensitive rewrites; keep draft changes separate from approved canon.
 ---
 
 # Chinese Novel Master Lab
@@ -78,6 +78,23 @@ Use three passes:
 
 Opening tension and a forward ending are useful tools, not quotas. Do not impose a fixed first-20-percent conflict rule or an artificial half-reveal when causality and the next chapter call for another shape.
 
+After the three passes, run the **final check** (终检) before presenting the candidate. This last gate is adapted from Commercial Writing System v2.1. It checks the writing; it does not take over the writing.
+
+1. Run `scripts/nml.py final-check` on the chapter.
+   - It checks quote style and pairing, stock AI-flavoured phrases, summary or uplift endings, and length.
+   - It also checks that the planned hook lands in the last lines, that the opening picks up the previous chapter, and that no planning text has leaked into the prose.
+   - Pass the recent chapters with `--previous`. When the plan names the ending, pass its key words with `--hook`. Pass the previous chapter's ending words with `--catch`.
+2. Audit the ending by hand.
+   - A serial chapter ends on a live consequence.
+   - A paywall, unit-end, volume-end, or other planned high-strength chapter cuts at the half-beat: the action is half done or just interrupted, and the cut was seeded earlier in the chapter.
+   - Hook types and strengths vary across chapters.
+3. Repair minimally.
+   - Fix punctuation, replace a flagged phrase, or move the cut point.
+   - Never rewrite dialogue, flatten a character's voice, or add explanation to satisfy the gate.
+   - If a repair touches more than three sentences, reread that passage as a human-voice pass.
+
+Every ERROR must be repaired, or reported to the user with a reason. A clean result does not mean the prose is good. If a later review changes the text, run the final check again. Read [final check](references/final-check.md) for the rules, project configuration, and hook strength scale.
+
 Controlled improvisation may remain only if it respects world rules, preserves irreversible losses, and can be reconciled within the current or next two chapters. Record any retained divergence backstage with its expiry and intended repair; never let a convenient improvisation silently become a new law of the world.
 
 For consequential or uncertain chapters, use a fresh read-only continuity check separate from literary feedback when available. A factual validator reports evidence and conflicts; it does not rewrite prose or decide character emotions. If no independent check was available, label the result as self-review.
@@ -105,7 +122,8 @@ Use the project's established paths. For a new project, a practical default is:
 - chapter candidate: `章节草稿/NNN_章节名.md`;
 - project planning documents, only when needed;
 - a separate candidate delta and evidence-backed conflict list when continuity matters;
-- a concise literary self-review or independent-reader result, kept separate from canon facts.
+- a concise literary self-review or independent-reader result, kept separate from canon facts;
+- the final-check result, with each repair and each kept finding;
 - a short running chapter summary for accepted work; for unapproved work, label it candidate and keep it out of approved state files.
 
 The workflow succeeds only if prose remains alive while hard continuity errors decrease. A single attractive chapter or a passing structural check cannot establish repeatable literary quality.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Small, dependency-free continuity ledger for Chinese Novel Master Lab.
+"""Small, dependency-free continuity ledger and final check for Chinese Novel Master Lab.
 
-The checker validates structured state transitions, not the truth or quality of prose.
+The ledger validates structured state transitions. The final check reports mechanical
+defects in one chapter. Neither judges the truth or quality of prose.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -561,6 +563,239 @@ def command_check(args: argparse.Namespace) -> int:
     return 1 if any(severity == "ERROR" for severity, _ in issues) else 0
 
 
+# ---------- Final check (终检) ----------
+# Mechanical last gate adapted from Commercial Writing System v2.1. It reports;
+# it never edits prose. Literary quality stays a human and reviewer judgment.
+
+FINAL_CHECK_CONFIG = "final-check.json"
+FINAL_CHECK_DEFAULTS: dict[str, Any] = {
+    "quotes": "cn_curly",
+    "length": {"min": None, "max": None, "tolerance": 0.15},
+    "banned": [
+        {"term": "极其"}, {"term": "极度"}, {"term": "宛如"}, {"term": "简直"},
+        {"term": "仿佛", "where": "narration"}, {"term": "毫无疑问"}, {"term": "分外"},
+        {"term": "赫然"}, {"term": "悄然"}, {"term": "蓦然"}, {"term": "不禁"},
+        {"term": "不由得"}, {"term": "殊不知"}, {"term": "浑然不觉"},
+        {"term": "不仅[^。！？\\n]{0,40}更是", "regex": True, "label": "不仅……更是……"},
+        {"term": "闪过一丝", "note": "人脸不是调色盘"},
+        {"term": "嘴角[^。！？\\n]{0,8}勾起", "regex": True, "label": "嘴角勾起", "max": 1, "window": 50},
+        {"term": "空气中弥漫着"}, {"term": "不易察觉"},
+    ],
+    "extra_banned": [],
+    "disable_banned": [],
+    "ending_window_paragraphs": 2,
+    "ending_patterns": [
+        "这不仅是", "一切才刚刚开始", "这只是开始", "从此[^。！？]{0,12}(?:不同|改变|再也)",
+        "命运的齿轮", "他(?:们)?不知道的是", "她(?:们)?不知道的是", "殊不知", "未完待续",
+    ],
+    "meta_patterns": [
+        "本章", "伏笔", "钩子", "细纲", "章纲", "作者有话说", "下章预告", "TODO", "候选稿",
+        "^\\s*[-*+]\\s", "^\\s*\\|", "【[^】]{0,12}】",
+    ],
+    "lost_quote_pattern": "[他她我你][^。！？”]{0,6}[说道问喊][：:](?!\\s*“)",
+    "landing_chars": 300,
+    "opening_chars": 400,
+}
+HEADING_RE = re.compile(r"^\s*(#+\s|第\s*[\d一二三四五六七八九十百千零两]+\s*[章回])")
+
+
+def load_final_config(project: Path | None, config: Path | None) -> dict[str, Any]:
+    merged = copy.deepcopy(FINAL_CHECK_DEFAULTS)
+    candidates = []
+    if project is not None:
+        candidates.append(project / LEDGER_DIR / FINAL_CHECK_CONFIG)
+    if config is not None:
+        if not config.is_file():
+            raise InputError(f"Final-check config does not exist: {config}")
+        candidates.append(config)
+    for path in candidates:
+        if not path.is_file():
+            continue
+        override = load_json(path)
+        for key, value in override.items():
+            if key not in FINAL_CHECK_DEFAULTS:
+                raise InputError(f"Unknown final-check config key {key!r} in {path}")
+            if key == "length":
+                if not isinstance(value, dict):
+                    raise InputError("final-check length must be an object")
+                merged["length"].update(value)
+            else:
+                merged[key] = value
+    return merged
+
+
+def chapter_body(text: str) -> tuple[list[tuple[int, str]], str]:
+    lines = text.replace("\r\n", "\n").split("\n")
+    start = 0
+    for index, line in enumerate(lines):
+        if line.strip():
+            start = index + 1 if HEADING_RE.match(line) else index
+            break
+    numbered = [(start + i + 1, line) for i, line in enumerate(lines[start:]) if line.strip()]
+    return numbered, "\n".join(lines[start:])
+
+
+def han_count(text: str) -> int:
+    return len(re.findall(r"[㐀-鿿]", text))
+
+
+def mask_dialogue(text: str) -> str:
+    return re.sub(r"“[^”]*”", lambda match: " " * len(match.group(0)), text)
+
+
+def final_quotes(lines: list[tuple[int, str]], cfg: dict[str, Any], issues: list[tuple[str, str]]) -> None:
+    mode = cfg["quotes"]
+    if mode == "none":
+        return
+    if mode not in {"cn_curly", "corner"}:
+        raise InputError(f"Unsupported quotes mode {mode!r}; use cn_curly, corner, or none")
+    open_q, close_q = ("“", "”") if mode == "cn_curly" else ("「", "」")
+    wrong = [(n, s) for n, s in lines if '"' in s]
+    if wrong:
+        record(issues, "ERROR", f"[quotes] L{wrong[0][0]}: straight double quotes on {len(wrong)} line(s); use {open_q} {close_q}")
+    other = "「」『』" if mode == "cn_curly" else "“”"
+    mixed = [(n, s) for n, s in lines if any(c in s for c in other)]
+    if mixed:
+        record(issues, "ERROR", f"[quotes] L{mixed[0][0]}: other quote style on {len(mixed)} line(s); project uses {open_q} {close_q}")
+    half = [(n, s) for n, s in lines if re.search(r"[一-鿿][,?!;:][一-鿿]", s)]
+    if half:
+        record(issues, "WARN", f"[quotes] L{half[0][0]}: half-width punctuation between Chinese characters on {len(half)} line(s)")
+    for index, (lineno, line) in enumerate(lines):
+        depth = 0
+        for char in line:
+            if char == open_q:
+                if depth:
+                    record(issues, "ERROR", f"[quotes] L{lineno}: a quote opens before the previous one closes")
+                depth = 1
+            elif char == close_q:
+                if not depth:
+                    record(issues, "ERROR", f"[quotes] L{lineno}: closing quote without an opening quote")
+                depth = 0
+        if depth:
+            following = lines[index + 1][1].lstrip() if index + 1 < len(lines) else ""
+            if not following.startswith(open_q):
+                record(issues, "ERROR", f"[quotes] L{lineno}: quote is not closed in this paragraph")
+    pattern = cfg.get("lost_quote_pattern")
+    if pattern and mode == "cn_curly":
+        lost = re.compile(pattern)
+        for lineno, line in lines:
+            if open_q not in line and lost.search(line):
+                record(issues, "WARN", f"[quotes] L{lineno}: dialogue may have lost its quotes: {line.strip()[:40]}")
+
+
+def final_banned(
+    body: str, lines: list[tuple[int, str]], previous: list[str], cfg: dict[str, Any],
+    issues: list[tuple[str, str]],
+) -> None:
+    disabled = set(cfg.get("disable_banned", []))
+    rules = [rule for rule in [*cfg["banned"], *cfg.get("extra_banned", [])]
+             if isinstance(rule, dict) and rule.get("term") not in disabled]
+    for rule in rules:
+        term = rule.get("term")
+        if not isinstance(term, str) or not term:
+            raise InputError("Each banned rule needs a nonempty term")
+        regex = re.compile(term if rule.get("regex") else re.escape(term))
+        narration_only = rule.get("where") == "narration"
+        current = regex.findall(mask_dialogue(body) if narration_only else body)
+        if not current:
+            continue
+        limit = int(rule.get("max", 0))
+        window = int(rule.get("window", 1))
+        earlier = previous[-(window - 1):] if window > 1 else []
+        total = len(current) + sum(
+            len(regex.findall(mask_dialogue(text) if narration_only else text)) for text in earlier
+        )
+        if total <= limit:
+            continue
+        label = rule.get("label") or term
+        note = f"; {rule['note']}" if rule.get("note") else ""
+        line = next((n for n, s in lines if regex.search(mask_dialogue(s) if narration_only else s)), 0)
+        scope = f"{total} in the last {window} chapter(s)" if window > 1 else f"{len(current)} time(s)"
+        record(issues, rule.get("severity", "ERROR"), f"[phrase] L{line}: “{label}” appears {scope}, limit {limit}{note}")
+
+
+def final_structure(
+    lines: list[tuple[int, str]], body: str, cfg: dict[str, Any], issues: list[tuple[str, str]],
+) -> None:
+    count = han_count(body)
+    low, high = cfg["length"].get("min"), cfg["length"].get("max")
+    tolerance = float(cfg["length"].get("tolerance") or 0)
+    if isinstance(low, int) and count < low:
+        severity = "ERROR" if count < low * (1 - tolerance) else "WARN"
+        record(issues, severity, f"[length] {count} Han characters, below minimum {low}")
+    if isinstance(high, int) and count > high:
+        severity = "ERROR" if count > high * (1 + tolerance) else "WARN"
+        record(issues, severity, f"[length] {count} Han characters, above maximum {high}")
+    tail = lines[-int(cfg["ending_window_paragraphs"]):] if lines else []
+    for pattern in cfg["ending_patterns"]:
+        regex = re.compile(pattern)
+        for lineno, line in tail:
+            if regex.search(line):
+                record(issues, "ERROR", f"[ending] L{lineno}: summary or uplift ending: {line.strip()[:40]}")
+    for pattern in cfg["meta_patterns"]:
+        regex = re.compile(pattern)
+        for lineno, line in lines:
+            if regex.search(line):
+                record(issues, "WARN", f"[meta] L{lineno}: possible planning or audit text in prose: {line.strip()[:40]}")
+                break
+
+
+def final_hooks(
+    body: str, cfg: dict[str, Any], hook: list[str], catch: list[str], issues: list[tuple[str, str]],
+) -> None:
+    plain = re.sub(r"\s+", "", body)
+    if hook:
+        tail = plain[-int(cfg["landing_chars"]):]
+        missing = [word for word in hook if word not in tail]
+        if missing:
+            record(issues, "ERROR", f"[hook] planned ending is not in the last {cfg['landing_chars']} characters: {'、'.join(missing)}")
+    if catch:
+        head = plain[:int(cfg["opening_chars"])]
+        missing = [word for word in catch if word not in head]
+        if missing:
+            record(issues, "ERROR", f"[catch] opening does not pick up the previous ending within {cfg['opening_chars']} characters: {'、'.join(missing)}")
+
+
+def split_keywords(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [word.strip() for word in re.split(r"[,，、]", value) if word.strip()]
+
+
+def command_final_check(args: argparse.Namespace) -> int:
+    chapter = Path(args.chapter_file).expanduser().resolve()
+    if not chapter.is_file():
+        raise InputError(f"Chapter file does not exist: {chapter}")
+    project = Path(args.project).expanduser().resolve() if args.project else None
+    config = Path(args.config).expanduser().resolve() if args.config else None
+    cfg = load_final_config(project, config)
+    text = chapter.read_text(encoding="utf-8")
+    lines, body = chapter_body(text)
+    previous = []
+    for item in args.previous or []:
+        path = Path(item).expanduser().resolve()
+        if not path.is_file():
+            raise InputError(f"Previous chapter does not exist: {path}")
+        previous.append(chapter_body(path.read_text(encoding="utf-8"))[1])
+    issues: list[tuple[str, str]] = []
+    if not body.strip():
+        record(issues, "ERROR", "[length] chapter has no prose after the heading")
+    final_quotes(lines, cfg, issues)
+    final_banned(body, lines, previous, cfg, issues)
+    final_structure(lines, body, cfg, issues)
+    final_hooks(body, cfg, split_keywords(args.hook), split_keywords(args.catch), issues)
+    if project is not None:
+        state_path = ledger_paths(project)[1]
+        if state_path.is_file():
+            state = load_json(state_path)
+            validate_state(state, issues)
+            if not any(severity == "ERROR" and "state.json" in message for severity, message in issues):
+                scan_retired_names(body, state, issues)
+    print(f"Final check: {chapter.name}, {han_count(body)} Han characters")
+    show_issues(issues)
+    return 1 if any(severity == "ERROR" for severity, _ in issues) else 0
+
+
 def register_approved_chapter(sources: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
     updated = copy.deepcopy(sources)
     chapter = delta["chapter"]
@@ -666,6 +901,17 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("project")
     check.add_argument("--delta")
     check.set_defaults(func=command_check)
+    final = sub.add_parser(
+        "final-check",
+        help="Read-only last gate for one chapter: quotes, stock phrases, ending, length, hook landing",
+    )
+    final.add_argument("chapter_file")
+    final.add_argument("--project", help="Novel project root; reads .novel-master-lab/final-check.json and state names if present")
+    final.add_argument("--config", help="Extra final-check JSON config, applied after the project config")
+    final.add_argument("--previous", nargs="*", help="Earlier chapters, oldest first, for multi-chapter phrase limits")
+    final.add_argument("--hook", help="Comma-separated words the planned ending must contain near the end")
+    final.add_argument("--catch", help="Comma-separated words the opening must contain to pick up the previous ending")
+    final.set_defaults(func=command_final_check)
     approve = sub.add_parser("approve", help="Promote a checked candidate after explicit user approval")
     approve.add_argument("project")
     approve.add_argument("--delta", required=True)
