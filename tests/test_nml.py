@@ -1,4 +1,4 @@
-"""Behavioral tests for the optional, structured Novel Master Lab ledger."""
+"""Behavioral tests for the structured Novel Master Lab ledger, bilingual final-check, and cross-volume audit."""
 
 from __future__ import annotations
 
@@ -355,7 +355,6 @@ class LedgerTests(unittest.TestCase):
         self.assertIn("no recorded payoff", message)
 
 
-
 class FinalCheckTests(unittest.TestCase):
     CLEAN = (
         "# 第六章 引水人\n\n"
@@ -495,6 +494,123 @@ class FinalCheckTests(unittest.TestCase):
         code, message = self.run_cli("final-check", str(path), "--project", str(project))
         self.assertEqual(code, 0, message)
         self.assertIn("阿狗", message)
+
+
+class EnglishModeTests(unittest.TestCase):
+    CLEAN_EN = (
+        "# Chapter 002: Truth or Dare\n\n"
+        "I sit back against the leather bench and stare at my cracked screen.\n\n"
+        "Six months ago, I bought a cheap cord bracelet in Soho and mailed it to a stranger.\n\n"
+        "\"Pick up the line,\" Lucien says, his voice low and steady.\n\n"
+        "He steps closer, his shadow falling across the marble threshold.\n\n"
+        "\"Locks remain decorative,\" he murmurs.\n"
+    )
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def chapter(self, text: str, name: str = "Ch002.md") -> Path:
+        path = self.root / name
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def run_cli(self, *args: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+            code = nml.main(list(args))
+        return code, output.getvalue()
+
+    def test_clean_english_present_chapter_passes_with_flashback(self) -> None:
+        path = self.chapter(self.CLEAN_EN)
+        code, msg = self.run_cli(
+            "final-check", str(path), "--lang", "en", "--tense", "present",
+            "--hook", "decorative", "--catch", "leather bench",
+        )
+        self.assertEqual(code, 0, msg)
+        self.assertIn("lang=en", msg)
+        self.assertIn("0 error(s)", msg)
+
+    def test_english_unclosed_straight_quote_is_error_but_multipara_is_allowed(self) -> None:
+        bad = self.chapter('# Chapter 1\n\n"Get in the car.\n\nI stare at him.\n', "bad.md")
+        code, msg = self.run_cli("final-check", str(bad), "--lang", "en")
+        self.assertEqual(code, 1, msg)
+        self.assertIn("[quotes]", msg)
+
+        multi = self.chapter('# Chapter 1\n\n"First paragraph of speech.\n\n"Second paragraph closes it."\n', "ok.md")
+        code, msg = self.run_cli("final-check", str(multi), "--lang", "en")
+        self.assertEqual(code, 0, msg)
+
+    def test_cjk_leak_in_english_chapter_is_blocked(self) -> None:
+        leaked = self.chapter('# Chapter 65\n\nI stare at the message: 程鼠鼠 sent a file.\n', "ch065.md")
+        code, msg = self.run_cli("final-check", str(leaked), "--lang", "en")
+        self.assertEqual(code, 1, msg)
+        self.assertIn("[cjk-leak]", msg)
+
+    def test_tense_drift_blocks_past_chapter_when_present_required(self) -> None:
+        past_ch = self.chapter(
+            "# Chapter 3\n\n"
+            "I walked across the library and sat down.\n\n"
+            "He looked at me and said nothing.\n\n"
+            "I turned away and grabbed my coat.\n",
+            "ch003.md",
+        )
+        code, msg = self.run_cli("final-check", str(past_ch), "--lang", "en", "--tense", "present")
+        self.assertEqual(code, 1, msg)
+        self.assertIn("[tense]", msg)
+
+    def test_western_cliches_fourth_wall_and_summary_endings_are_caught(self) -> None:
+        dirty = self.chapter(
+            "# Chapter 9\n\n"
+            "I released out a breath I didn't know I was holding as his blue orbs met mine.\n\n"
+            "It is the same ring from ChapterFour, no—from Chapter Nine.\n\n"
+            "Everything was about to change.\n",
+            "ch009.md",
+        )
+        code, msg = self.run_cli("final-check", str(dirty), "--lang", "en")
+        self.assertEqual(code, 1, msg)
+        self.assertIn("color orbs", msg)
+        self.assertIn("[meta]", msg)
+        self.assertIn("[ending]", msg)
+
+    def test_audit_series_catches_persona_leak_and_continuity_drift(self) -> None:
+        project = self.root / "novel"
+        cdir = project / "正文"
+        cdir.mkdir(parents=True)
+        self.assertEqual(self.run_cli("init", str(project))[0], 0)
+        state_path = project / ".novel-master-lab" / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["retired_names"] = ["Columbia", "Sloane Sterling"]
+        state["continuity_rules"] = [{
+            "id": "aurelian-18th-floor",
+            "forbidden_regex": r"\b28th\s+floor\b",
+            "ignore_case": True,
+            "severity": "ERROR",
+        }]
+        state["persona_locks"] = [{
+            "id": "vee-mask",
+            "isolated_until_chapter": 64,
+            "forbidden_patterns": [r"^\*\*Wren:\*\*.*Truth or Dare"],
+            "severity": "ERROR",
+        }]
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+        (cdir / "Ch001.md").write_text(
+            "# Chapter 1\n\nI walk into Halston on the 18th floor and text him.\n\n"
+            "**Vee:** *Truth or Dare prank!*\n\nHe stares back and says nothing.\n",
+            encoding="utf-8",
+        )
+        (cdir / "Ch002.md").write_text(
+            "# Chapter 2\n\nI take the elevator to the 28th floor near Columbia.\n\n"
+            "**Wren:** *Truth or Dare prank!*\n\nHe looks at me and smirks.\n",
+            encoding="utf-8",
+        )
+        code, msg = self.run_cli("audit-series", str(project), "--lang", "en", "--tense", "present")
+        self.assertEqual(code, 1, msg)
+        self.assertIn("aurelian-18th-floor", msg)
+        self.assertIn("vee-mask", msg)
+        self.assertIn("Columbia", msg)
 
 
 if __name__ == "__main__":

@@ -21,3 +21,11 @@ Compare the draft with the compact brief and exact source spans. Check material 
 Replace abstract judgments with decisions, gestures, or consequences when that increases clarity. Keep sentence lengths varied and dialogue character-specific. Cut repeated explanation, universal-sounding maxims, and symmetrical “not X but Y” constructions when they flatten the scene. Do not remove a necessary fact merely to make prose shorter.
 
 Aim for an opening with pressure and a forward ending, but do not force a fixed percentage or a cliffhanger in every chapter. Quiet aftermath can be a strong ending when it changes the relationship or the reader's question. No metric or audit label belongs in the finished prose.
+
+## English Serialized Prose Craft (`--lang en`)
+
+When writing or polishing outbound English chapters:
+
+- **Idiomatic Voice & Subtext:** Ground emotion in physical action, sensory friction, and clipped subtext rather than translated idioms or filter verbs (`I couldn't help but feel`, `I noticed that`).
+- **High-Tension Intimacy:** Build romantic or sensual escalation through breath, proximity, consent-in-action, tactile contrast, and power shifts rather than clinical labels or dated purple prose (`orbs`, `ministrations`).
+- **Tense Discipline:** In first-person present-tense serials, keep immediate scene beats in simple present while preserving past/pluperfect strictly for anchored memories (`Six months ago...`, `had left`) and subjunctive counterfactuals (`as if he were`).

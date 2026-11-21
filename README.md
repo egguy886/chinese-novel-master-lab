@@ -194,3 +194,33 @@ python3 scripts/nml.py --help
 Python 工具无第三方运行依赖；测试覆盖结构化账本的主要状态转换，不等于跨 Agent 实际写作质量测试。Agent 是否遵循 Skill 还取决于其版本、权限、上下文与所读项目材料。`check` 的通过只说明已编码的结构规则通过，不能替代人工审稿和来源核对。
 
 仓库当前未附开源许可证；公开可见不代表取得复制、修改或再分发授权。
+
+## 英文出海小说模式（`--lang en` 增量扩展）
+
+在不改变原有中文网文默认规则（默认仍为 `--lang zh`）的前提下，`scripts/nml.py` 新增了对**出海英文长篇连载**的单章终检与跨卷连续性终检支持：
+
+```bash
+# 英文单章终检（校验英文引号配对、中文残留、第一人称现在时/过去时漂移、欧美网文套话密度、第四面墙穿帮与章尾钩子）
+python3 "$SKILL_DIR/scripts/nml.py" final-check "$BOOK/正文/Ch001.md" \
+  --project "$BOOK" \
+  --lang en \
+  --tense present \
+  --hook "decorative" \
+  --catch "screen"
+
+# 跨卷全书只读终检（统计各卷时态锚点稳定率、全书高频套话计数、废弃旧名、跨卷物理设定规则与马甲隔离锁）
+python3 "$SKILL_DIR/scripts/nml.py" audit-series "$BOOK" \
+  --lang en \
+  --tense present \
+  --volume-size 20
+```
+
+| 英文模式新增检查项 | 报 ERROR | 报 WARN |
+| --- | --- | --- |
+| 英文引号（`en_double` / `en_straight` / `en_curly` / `en_single`） | 英文段落引号未闭合（兼容欧美跨段开口引号与书信斜体块）、混入中文直角/书名号、同行直弯引号混排 | 同章混用直双引号与弯双引号 |
+| 中文字符防漏（`cjk-leak`） | 英文正文残留任何汉字或中文全角标点 | — |
+| 叙事时态漂移（`tense`） | 主线时态锚点比例低于阈值（默认 `80%`，自动豁免对白、明确过去时间状语从句、虚拟语气与过去完成时倒叙段） | 现在时主线段落混入无时间锚点的过去时叙述（或反之） |
+| 欧美套话与穿帮（`phrase` / `meta`） | 高频欧美 AI/同人套话（如 `breath I didn't know I was holding`、`blue orbs`、`ministrations`、`a testament to`）、正文叙述出现 `Chapter N` 第四面墙穿帮、总结式章尾 | 跨章高频滤镜词与比喻超窗（如 `couldn't help but`、`trapped bird`、`apex predator`） |
+| 跨卷连续性与马甲锁（`continuity` / `persona`） | 命中 `state.json` 中可选配置的 `continuity_rules`（跨卷楼层/方位/设定禁则）或 `persona_locks`（掉马章节前真名与匿名马甲串线） | `retired_names` / `deprecated_names` 旧名残留 |
+
+英文项目可直接复制 [`templates/final-check-en.json`](templates/final-check-en.json) 至 `$BOOK/.novel-master-lab/final-check.json` 按书微调词数区间与时态基线。

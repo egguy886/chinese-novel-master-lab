@@ -53,3 +53,33 @@ For filled examples, read [structured delta examples](data-examples.md). The tem
 `python3 "$SKILL_DIR/scripts/nml.py" approve "$PROJECT" --delta "$PROJECT/path/to/delta.json" --approval-note "user approved chapter and delta"` mutates the state and source registry only after explicit user approval in the conversation. The agent must not use it merely because a script passes. It saves the previous state and source registry in `backups/` and an approval receipt in `approvals/`; the delta remains a candidate artifact. The command refuses unresolved `new_canon_requests`, stale hashes, unsupported rewrites, and duplicate approval receipts. Its approval note is a record of a decision, not machine proof that a human approved it.
 
 For an earlier-chapter rewrite, use a scoped manual impact review instead of `approve`; subsequent accepted chapters may need re-evaluation. Never silently replace them.
+
+## Optional Cross-Volume Rules (`continuity_rules` & `persona_locks`)
+
+Without changing the default `templates/state.json` schema, `state.json` optionally accepts two read-only arrays checked by `check`, `final-check`, and `audit-series`:
+
+```json
+{
+  "continuity_rules": [
+    {
+      "id": "aurelian-18th-floor",
+      "forbidden_regex": "\\b28th\\s+floor\\b",
+      "ignore_case": true,
+      "where": "any",
+      "chapter_start": 1,
+      "chapter_end": 138,
+      "severity": "ERROR",
+      "note": "Suite is on the 18th floor"
+    }
+  ],
+  "persona_locks": [
+    {
+      "id": "burner-alias-isolation",
+      "isolated_until_chapter": 64,
+      "forbidden_patterns": ["^\\*\\*RealName:\\*\\*.*SecretTagline"],
+      "severity": "ERROR",
+      "note": "Alias is not unmasked until Chapter 65"
+    }
+  ]
+}
+```

@@ -1,0 +1,17 @@
+{
+  "lang": "en",
+  "quotes": "en_double",
+  "length": {
+    "min": 1400,
+    "max": 2600,
+    "tolerance": 0.2
+  },
+  "tense": {
+    "mode": "present",
+    "min_ratio": 0.8,
+    "paragraph_slip": true,
+    "flashback_chapters": []
+  },
+  "extra_banned": [],
+  "disable_banned": []
+}

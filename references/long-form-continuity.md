@@ -62,3 +62,11 @@ Use project-specific constraints only when their scope and current status are cl
 - A checker passes an incorrect value that was copied into canon; accepted prose remains an important evidence source.
 - A chapter promises an immediate reveal, but the next accepted chapter skips it.
 - An author's knowledge is mistakenly assigned to a viewpoint character who has not learned the fact.
+
+## English Multi-Volume & Persona-Isolation Checks
+
+For outbound English multi-volume serials (100+ chapters), check three additional drift vectors during rewrites and arc audits:
+
+- **Persona / Burner Isolation:** When a character operates under an anonymous handle, burner phone, or secret alias before an unmasking chapter, keep dialogue/SMS headers (`**Alias:**`), address forms, and viewpoint knowledge strictly separated until the reveal chapter.
+- **Spatial & Anatomical Anchors:** Lock recurring apartment floors, university/company names, left/right scars, moles, or jewelry hands in `.novel-master-lab/state.json` (`continuity_rules`) so mid-book chapters do not drift.
+- **Narrative Tense Baseline:** Keep mainline narration anchored to one primary tense across volumes (e.g., First-Person Present or Third-Person Past), reserving tense shifts strictly for anchored flashbacks and dialogue.

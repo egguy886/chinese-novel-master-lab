@@ -1,7 +1,7 @@
 ---
 name: chinese-novel-master-lab
 description: >-
-  Plan, draft, continue, and rewrite Chinese serialized fiction (中文网文、长篇小说) with natural prose, evidence-backed continuity, and a read-only final check (终检) for quotes, stock phrases, endings, and hook landing. Use for new projects, chapter writing, or continuity-sensitive rewrites; keep draft changes separate from approved canon.
+  Plan, draft, continue, and rewrite Chinese serialized fiction (中文网文、长篇小说) and outbound English serialized fiction (出海英文长篇小说, `--lang en`) with natural prose, evidence-backed continuity, and a read-only final check (终检) for quotes, CJK leaks, narrative tense drift, stock phrases, endings, hook landing, and cross-volume continuity (`audit-series`). Use for new projects, chapter writing, or continuity-sensitive rewrites; keep draft changes separate from approved canon.
 ---
 
 # Chinese Novel Master Lab
@@ -127,3 +127,15 @@ Use the project's established paths. For a new project, a practical default is:
 - a short running chapter summary for accepted work; for unapproved work, label it candidate and keep it out of approved state files.
 
 The workflow succeeds only if prose remains alive while hard continuity errors decrease. A single attractive chapter or a passing structural check cannot establish repeatable literary quality.
+
+## English Novel Mode (`--lang en`)
+
+All workflows, three-pass drafting rules, and draft-to-canon approval boundaries above remain unchanged for Chinese projects (`--lang zh`, the default). When planning, drafting, rewriting, or auditing an English serialized novel (such as Western romance, billionaire drama, fantasy, or thriller), enable English mode (`--lang en`):
+
+- **Single-chapter final check (`final-check --lang en`):**
+  - Checks English quote pairing (`en_double`, `en_straight`, `en_curly`, `en_single`), allowing standard Western multi-paragraph dialogue and italicized/blockquote epistolary passages while blocking CJK bracket quotes (`「」『』《》`).
+  - Blocks accidental CJK characters or full-width Chinese punctuation leaked into English prose (`[cjk-leak]`).
+  - Checks narrative tense consistency (`--tense present|past|auto`) while exempting dialogue, definite past-time anchors (`Six months ago`, `last night`, `in college`, `used to`), counterfactuals/subjunctives (`if`, `as though`, `wish`), and pluperfect flashback blocks.
+  - Enforces Western commercial fiction cliché caps (`breath I didn't know I was holding`, `color orbs`, `ministrations`, `a testament to`, `unbeknownst to`, `little did X know`, plus multi-chapter window caps on `couldn't help but`, `trapped bird`, `apex predator`, etc.), summary-ending blocks, fourth-wall chapter-reference blocks, and word-based `--hook` / `--catch` landing windows.
+- **Cross-volume series audit (`audit-series --lang en`):**
+  - Runs read-only across all chapters in `正文/` or `chapters/`, reporting per-volume narrative tense stability, book-wide cliché density, retired/deprecated names, optional chapter-scoped `continuity_rules`, and `persona_locks` (burner/alias isolation before an unmasking chapter) from `.novel-master-lab/state.json`.

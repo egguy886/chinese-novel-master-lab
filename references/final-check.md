@@ -105,3 +105,13 @@ Add a short final-check block to the chapter review:
 - the ending's hook type and strength.
 
 A passing final check means the encoded rules passed. It does not certify literary quality, factual truth, or user approval.
+
+## English Novel Mode (`--lang en`)
+
+Pass `--lang en` (or set `"lang": "en"` in `.novel-master-lab/final-check.json`; see `templates/final-check-en.json`) when checking English manuscripts:
+
+- **`quotes`:** `en_double` (default; validates pairing for straight `"` or curly `“ ”`, supports multi-paragraph open quotes and italicized/blockquote epistolary blocks, blocks CJK `「」『』《》`), `en_straight`, `en_curly`, or `en_single`.
+- **`cjk_leak_check`:** `true` by default in English mode; flags any CJK character or full-width Chinese punctuation (`，。！？；：【】`) as `ERROR`.
+- **`tense`:** `{"mode": "present" | "past" | "auto" | "off", "min_ratio": 0.80, "paragraph_slip": true, "flashback_chapters": []}` (or CLI `--tense`). Masks dialogue, skips sentences with definite past-time markers (`ago`, `yesterday`, `last night`, `in college`, `used to`) or counterfactuals (`if`, `as though`, `wish`), and skips multi-paragraph pluperfect flashbacks.
+- **`length`, `landing_words`, `opening_words`:** switches length and `--hook` / `--catch` windows from Han characters to English word counts (default `landing_words: 120`, `opening_words: 160`).
+- **Cross-volume series check:** run `scripts/nml.py audit-series "$PROJECT" --lang en --tense present` to audit an entire multi-volume manuscript in read-only mode.

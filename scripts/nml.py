@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Small, dependency-free continuity ledger and final check for Chinese Novel Master Lab.
+"""Small, dependency-free continuity ledger, chapter final check, and cross-volume series auditor
+for Chinese Novel Master Lab (supporting both Chinese `--lang zh` and English `--lang en` fiction).
 
-The ledger validates structured state transitions. The final check reports mechanical
-defects in one chapter. Neither judges the truth or quality of prose.
+The ledger validates structured state transitions. The final check reports mechanical,
+tense-drift, quote, cliché-density, and continuity defects in one chapter or across volumes.
+Neither mutates manuscript prose.
 """
 
 from __future__ import annotations
@@ -28,6 +30,11 @@ SOURCE_STATUSES = {"active", "candidate", "stale", "mixed"}
 ENTITY_KINDS = ("characters", "locations", "relationships", "props", "knowledge", "threads")
 CHARACTER_FIELDS = {"name", "location", "condition", "resources", "aim", "voice", "status"}
 RELATIONSHIP_FIELDS = {"trust", "debt", "power", "boundary", "promise"}
+SUPPORTED_LANGS = {"zh", "en", "auto"}
+SUPPORTED_QUOTES = {
+    "cn_curly", "corner", "en_double", "en_straight", "en_curly", "en_single", "none"
+}
+SUPPORTED_TENSE_MODES = {"off", "auto", "present", "past"}
 
 
 class InputError(Exception):
@@ -85,6 +92,18 @@ def known_holder(value: Any, state: dict[str, Any]) -> bool:
     )
 
 
+def infer_chapter_number(path: Path) -> int | None:
+    m = re.search(r"(?:ch(?:apter)?[-_\s]*)?(\d{1,4})", path.stem, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def _term_occurs(text: str, term: str) -> bool:
+    if re.match(r"^[A-Za-z0-9 .'-]+$", term):
+        pat = rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])"
+        return bool(re.search(pat, text))
+    return term in text
+
+
 def scan_retired_names(prose: str, state: dict[str, Any], issues: list[tuple[str, str]]) -> None:
     active: set[str] = set()
     retired = [name for name in state.get("retired_names", []) if isinstance(name, str) and name]
@@ -104,8 +123,72 @@ def scan_retired_names(prose: str, state: dict[str, Any], issues: list[tuple[str
     for name in sorted(active, key=len, reverse=True):
         masked = masked.replace(name, " " * len(name))
     for name in sorted(set(retired)):
-        if name in masked:
-            record(issues, "WARN", f"retired or deprecated name may appear in prose: {name}")
+        if _term_occurs(masked, name):
+            record(issues, "WARN", f"[names] retired or deprecated name may appear in prose: {name}")
+
+
+def scan_state_continuity_rules(
+    prose: str,
+    lines: list[tuple[int, str]],
+    state: dict[str, Any],
+    chapter_num: int | None,
+    lang: str,
+    issues: list[tuple[str, str]],
+) -> None:
+    """Scan optional continuity_rules and persona_locks from state.json against chapter prose."""
+    narration = mask_dialogue(prose, lang)
+
+    for idx, rule in enumerate(state.get("continuity_rules", [])):
+        if not isinstance(rule, dict):
+            continue
+        c_start = rule.get("chapter_start")
+        c_end = rule.get("chapter_end")
+        if chapter_num is not None:
+            if isinstance(c_start, int) and chapter_num < c_start:
+                continue
+            if isinstance(c_end, int) and chapter_num > c_end:
+                continue
+        pattern = rule.get("forbidden_regex") or rule.get("term")
+        if not isinstance(pattern, str) or not pattern:
+            continue
+        is_regex = bool(rule.get("forbidden_regex") or rule.get("regex"))
+        flags = re.IGNORECASE if rule.get("ignore_case") else 0
+        rx = re.compile(pattern if is_regex else re.escape(pattern), flags)
+        where = rule.get("where", "any")
+        target = narration if where == "narration" else prose
+        if rx.search(target):
+            lineno = next(
+                (n for n, s in lines if rx.search(mask_dialogue(s, lang) if where == "narration" else s)),
+                0,
+            )
+            severity = rule.get("severity", "ERROR")
+            label = rule.get("id") or rule.get("label") or f"continuity_rules[{idx}]"
+            note = f" ({rule['note']})" if rule.get("note") else ""
+            record(issues, severity, f"[continuity] L{lineno}: rule '{label}' matched{note}")
+
+    for idx, lock in enumerate(state.get("persona_locks", [])):
+        if not isinstance(lock, dict):
+            continue
+        until_ch = lock.get("isolated_until_chapter")
+        if chapter_num is not None and isinstance(until_ch, int) and chapter_num > until_ch:
+            continue
+        patterns = lock.get("forbidden_patterns", [])
+        if not isinstance(patterns, list):
+            continue
+        for pat in patterns:
+            if not isinstance(pat, str) or not pat:
+                continue
+            rx = re.compile(pat, re.MULTILINE)
+            if rx.search(prose):
+                lineno = next((n for n, s in lines if rx.search(s)), 0)
+                severity = lock.get("severity", "ERROR")
+                lid = lock.get("id") or f"persona_locks[{idx}]"
+                note = f" ({lock['note']})" if lock.get("note") else ""
+                record(
+                    issues,
+                    severity,
+                    f"[persona] L{lineno}: premature identity leak for '{lid}' before chapter {until_ch}{note}",
+                )
 
 
 def ledger_paths(project: Path) -> tuple[Path, Path, Path]:
@@ -259,6 +342,10 @@ def validate_state(state: dict[str, Any], issues: list[tuple[str, str]]) -> None
             record(issues, "ERROR", f"state.json {kind} entries must be objects")
     if not isinstance(state.get("retired_names"), list):
         record(issues, "ERROR", "state.json retired_names must be an array")
+    if "continuity_rules" in state and not isinstance(state["continuity_rules"], list):
+        record(issues, "ERROR", "state.json continuity_rules must be an array")
+    if "persona_locks" in state and not isinstance(state["persona_locks"], list):
+        record(issues, "ERROR", "state.json persona_locks must be an array")
 
 
 def apply_new_entities(
@@ -493,7 +580,10 @@ def validate_delta(
             record(issues, "ERROR", "Chapter missing or changed after delta preparation")
         else:
             prose = chapter_path.read_text(encoding="utf-8")
+            lines, body = chapter_body(prose)
+            lang = detect_language(body, state.get("lang", "auto"))
             scan_retired_names(prose, state, issues)
+            scan_state_continuity_rules(body, lines, state, chapter, lang, issues)
     except (InputError, OSError) as exc:
         record(issues, "ERROR", f"Invalid chapter path: {exc}")
     day = delta.get("story_day")
@@ -563,13 +653,15 @@ def command_check(args: argparse.Namespace) -> int:
     return 1 if any(severity == "ERROR" for severity, _ in issues) else 0
 
 
-# ---------- Final check (终检) ----------
-# Mechanical last gate adapted from Commercial Writing System v2.1. It reports;
-# it never edits prose. Literary quality stays a human and reviewer judgment.
+# ---------- Final check (终检: Chinese & English modes) ----------
 
 FINAL_CHECK_CONFIG = "final-check.json"
-FINAL_CHECK_DEFAULTS: dict[str, Any] = {
+
+ZH_FINAL_CHECK_DEFAULTS: dict[str, Any] = {
+    "lang": "zh",
     "quotes": "cn_curly",
+    "cjk_leak_check": False,
+    "tense": {"mode": "off", "min_ratio": 0.80, "paragraph_slip": False, "flashback_chapters": []},
     "length": {"min": None, "max": None, "tolerance": 0.15},
     "banned": [
         {"term": "极其"}, {"term": "极度"}, {"term": "宛如"}, {"term": "简直"},
@@ -590,35 +682,220 @@ FINAL_CHECK_DEFAULTS: dict[str, Any] = {
     ],
     "meta_patterns": [
         "本章", "伏笔", "钩子", "细纲", "章纲", "作者有话说", "下章预告", "TODO", "候选稿",
-        "^\\s*[-*+]\\s", "^\\s*\\|", "【[^】]{0,12}】",
+        "^\\s*[-*+]\\s+\\S", "^\\s*\\|", "【[^】]{0,12}】",
     ],
     "lost_quote_pattern": "[他她我你][^。！？”]{0,6}[说道问喊][：:](?!\\s*“)",
     "landing_chars": 300,
     "opening_chars": 400,
+    "landing_words": 120,
+    "opening_words": 160,
 }
-HEADING_RE = re.compile(r"^\s*(#+\s|第\s*[\d一二三四五六七八九十百千零两]+\s*[章回])")
+
+EN_FINAL_CHECK_DEFAULTS: dict[str, Any] = {
+    "lang": "en",
+    "quotes": "en_double",
+    "cjk_leak_check": True,
+    "tense": {"mode": "auto", "min_ratio": 0.80, "paragraph_slip": True, "flashback_chapters": []},
+    "length": {"min": None, "max": None, "tolerance": 0.15},
+    "banned": [
+        {
+            "term": r"\b(?:let|lets|letting|released|releases)\s+out\s+a\s+breath\s+(?:I|she|he|we|they)\s+(?:didn['’]t|did\s+not|hadn['’]t)\s+know\b",
+            "regex": True,
+            "where": "narration",
+            "max": 0,
+            "severity": "ERROR",
+            "label": "breath I didn't know I was holding",
+            "note": "overused Western romance/YA stock cliché",
+        },
+        {
+            "term": r"\ba\s+testament\s+to\b",
+            "regex": True,
+            "where": "narration",
+            "max": 0,
+            "severity": "ERROR",
+            "label": "a testament to",
+            "note": "AI stock transitional phrase",
+        },
+        {
+            "term": r"\bunbeknownst\s+to\b",
+            "regex": True,
+            "where": "narration",
+            "max": 0,
+            "severity": "ERROR",
+            "label": "unbeknownst to",
+            "note": "omniscient intrusion / stock phrase",
+        },
+        {
+            "term": r"\blittle\s+did\s+(?:I|he|she|we|they)\s+know\b",
+            "regex": True,
+            "where": "narration",
+            "max": 0,
+            "severity": "ERROR",
+            "label": "little did X know",
+            "note": "retrospective spoiler cliché",
+        },
+        {
+            "term": r"\bministrations\b",
+            "regex": True,
+            "where": "narration",
+            "max": 0,
+            "severity": "ERROR",
+            "label": "ministrations",
+            "note": "dated fanfiction purple prose",
+        },
+        {
+            "term": r"\b(?:blue|brown|dark|green|grey|gray|amber|emerald|sapphire|icy|piercing|glowing)\s+orbs\b",
+            "regex": True,
+            "where": "narration",
+            "max": 0,
+            "severity": "ERROR",
+            "label": "color orbs",
+            "note": "say eyes/irises/gaze, never orbs",
+        },
+        {
+            "term": r"\bcouldn['’]t\s+help\s+but\b",
+            "regex": True,
+            "where": "narration",
+            "max": 1,
+            "window": 5,
+            "severity": "WARN",
+            "label": "couldn't help but",
+            "note": "filter-verb padding; show the action directly",
+        },
+        {
+            "term": r"\b(?:trapped\s+bird|bird\s+trapped\s+in)\b",
+            "regex": True,
+            "where": "narration",
+            "max": 1,
+            "window": 25,
+            "severity": "WARN",
+            "label": "trapped bird",
+            "note": "repetitive pulse/heartbeat simile across chapters",
+        },
+        {
+            "term": r"\bapex\s+predator\b",
+            "regex": True,
+            "where": "narration",
+            "max": 2,
+            "window": 15,
+            "severity": "WARN",
+            "label": "apex predator",
+            "note": "repetitive alpha-hero stock label",
+        },
+        {
+            "term": r"\bshivers?\s+(?:down|up)\s+(?:my|her|his)\s+spine\b",
+            "regex": True,
+            "where": "narration",
+            "max": 1,
+            "window": 10,
+            "severity": "WARN",
+            "label": "shiver down spine",
+        },
+        {
+            "term": r"\bknuckles\s+turn(?:ed|s|ing)?\s+(?:bone-)?white\b",
+            "regex": True,
+            "where": "narration",
+            "max": 2,
+            "window": 10,
+            "severity": "WARN",
+            "label": "knuckles turn white",
+        },
+    ],
+    "extra_banned": [],
+    "disable_banned": [],
+    "ending_window_paragraphs": 2,
+    "ending_patterns": [
+        r"(?i)\blittle\s+did\s+(?:I|he|she|we|they)\s+know\b",
+        r"(?i)\beverything\s+was\s+about\s+to\s+change\b",
+        r"(?i)\bnothing\s+would\s+ever\s+be\s+the\s+same\b",
+        r"(?i)\bthis\s+was\s+(?:only|just)\s+the\s+beginning\b",
+        r"(?i)\bthe\s+game\s+had\s+(?:only\s+)?just\s+begun\b",
+        r"(?i)\bto\s+be\s+continued\b",
+    ],
+    "meta_patterns": [
+        r"(?i)\b(?:in|since|from|back\s+in|see)\s+chapter\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|[a-z]+-[a-z]+)\b",
+        r"\bTODO\b",
+        r"\bFIXME\b",
+        r"(?i)\[insert\s+",
+        r"(?i)^author['’]s\s+note\b",
+        r"^\s*[-*+]\s+\S",
+        r"^\s*\|.*\|",
+    ],
+    "lost_quote_pattern": "",
+    "landing_chars": 300,
+    "opening_chars": 400,
+    "landing_words": 120,
+    "opening_words": 160,
+}
+
+ALLOWED_FINAL_CONFIG_KEYS = set(ZH_FINAL_CHECK_DEFAULTS.keys())
+
+HEADING_RE = re.compile(
+    r"^\s*(?:#+\s|第\s*[\d一二三四五六七八九十百千零两]+\s*[章回]|chapter\s+(?:\d+|[a-z-]+)\b|prologue\b|epilogue\b)",
+    re.IGNORECASE,
+)
 
 
-def load_final_config(project: Path | None, config: Path | None) -> dict[str, Any]:
-    merged = copy.deepcopy(FINAL_CHECK_DEFAULTS)
-    candidates = []
+def detect_language(text: str, requested: str | None) -> str:
+    lang = (requested or "zh").lower()
+    if lang not in SUPPORTED_LANGS:
+        raise InputError(f"Unsupported language {requested!r}; use zh, en, or auto")
+    if lang != "auto":
+        return lang
+    han = han_count(text)
+    en_w = en_word_count(text)
+    return "en" if en_w > han * 2 and en_w >= 10 else "zh"
+
+
+def load_final_config(
+    project: Path | None,
+    config: Path | None,
+    cli_lang: str | None = None,
+    sample_text: str = "",
+) -> dict[str, Any]:
+    candidates: list[tuple[Path, dict[str, Any]]] = []
     if project is not None:
-        candidates.append(project / LEDGER_DIR / FINAL_CHECK_CONFIG)
+        p_cfg = project / LEDGER_DIR / FINAL_CHECK_CONFIG
+        if p_cfg.is_file():
+            candidates.append((p_cfg, load_json(p_cfg)))
     if config is not None:
         if not config.is_file():
             raise InputError(f"Final-check config does not exist: {config}")
-        candidates.append(config)
-    for path in candidates:
-        if not path.is_file():
-            continue
-        override = load_json(path)
-        for key, value in override.items():
-            if key not in FINAL_CHECK_DEFAULTS:
+        candidates.append((config, load_json(config)))
+
+    for path, override in candidates:
+        for key in override:
+            if key not in ALLOWED_FINAL_CONFIG_KEYS:
                 raise InputError(f"Unknown final-check config key {key!r} in {path}")
+
+    # Determine effective language: CLI > config > default "zh"
+    raw_lang = cli_lang
+    if not raw_lang:
+        for _, override in candidates:
+            if "lang" in override:
+                raw_lang = str(override["lang"])
+    resolved_lang = detect_language(sample_text, raw_lang or "zh")
+
+    base = EN_FINAL_CHECK_DEFAULTS if resolved_lang == "en" else ZH_FINAL_CHECK_DEFAULTS
+    merged = copy.deepcopy(base)
+    merged["lang"] = resolved_lang
+
+    for _, override in candidates:
+        for key, value in override.items():
             if key == "length":
                 if not isinstance(value, dict):
                     raise InputError("final-check length must be an object")
                 merged["length"].update(value)
+            elif key == "tense":
+                if isinstance(value, str):
+                    merged["tense"]["mode"] = value
+                elif isinstance(value, dict):
+                    merged["tense"].update(value)
+                else:
+                    raise InputError("final-check tense must be a string or object")
+            elif key == "lang":
+                if not cli_lang:
+                    merged["lang"] = detect_language(sample_text, str(value))
             else:
                 merged[key] = value
     return merged
@@ -639,29 +916,56 @@ def han_count(text: str) -> int:
     return len(re.findall(r"[㐀-鿿]", text))
 
 
-def mask_dialogue(text: str) -> str:
-    return re.sub(r"“[^”]*”", lambda match: " " * len(match.group(0)), text)
+def en_word_count(text: str) -> int:
+    return len(re.findall(r"[A-Za-z]+(?:['’][A-Za-z]+)?|\d+(?:[.,]\d+)?", text))
 
 
-def final_quotes(lines: list[tuple[int, str]], cfg: dict[str, Any], issues: list[tuple[str, str]]) -> None:
-    mode = cfg["quotes"]
-    if mode == "none":
-        return
-    if mode not in {"cn_curly", "corner"}:
-        raise InputError(f"Unsupported quotes mode {mode!r}; use cn_curly, corner, or none")
-    open_q, close_q = ("“", "”") if mode == "cn_curly" else ("「", "」")
-    wrong = [(n, s) for n, s in lines if '"' in s]
-    if wrong:
-        record(issues, "ERROR", f"[quotes] L{wrong[0][0]}: straight double quotes on {len(wrong)} line(s); use {open_q} {close_q}")
-    other = "「」『』" if mode == "cn_curly" else "“”"
-    mixed = [(n, s) for n, s in lines if any(c in s for c in other)]
-    if mixed:
-        record(issues, "ERROR", f"[quotes] L{mixed[0][0]}: other quote style on {len(mixed)} line(s); project uses {open_q} {close_q}")
-    half = [(n, s) for n, s in lines if re.search(r"[一-鿿][,?!;:][一-鿿]", s)]
-    if half:
-        record(issues, "WARN", f"[quotes] L{half[0][0]}: half-width punctuation between Chinese characters on {len(half)} line(s)")
+def mask_dialogue(text: str, lang: str = "zh") -> str:
+    masked = re.sub(r"“[^”]*”", lambda m: " " * len(m.group(0)), text)
+    if lang == "en":
+        masked = re.sub(r'"[^"\n]*"', lambda m: " " * len(m.group(0)), masked)
+    return masked
+
+
+def _check_straight_quotes(lines: list[tuple[int, str]], issues: list[tuple[str, str]]) -> None:
+    in_epistolary = False
     for index, (lineno, line) in enumerate(lines):
-        depth = 0
+        stripped = line.strip()
+        count = line.count('"')
+        if in_epistolary:
+            if not (stripped.startswith("*") or stripped.startswith(">")):
+                record(issues, "ERROR", f"[quotes] L{lineno}: multi-line italicized/block quote was not closed")
+                in_epistolary = False
+            elif count % 2 == 1:
+                in_epistolary = False
+                continue
+            else:
+                continue
+        if count % 2 == 1:
+            following = lines[index + 1][1].lstrip() if index + 1 < len(lines) else ""
+            if stripped.startswith('"') and following.startswith('"'):
+                continue
+            if (stripped.startswith('*"') or stripped.startswith("> ")) and (following.startswith("*") or following.startswith(">")):
+                in_epistolary = True
+                continue
+            record(issues, "ERROR", f"[quotes] L{lineno}: quote is not closed in this paragraph")
+
+
+def _check_paired_quotes(
+    lines: list[tuple[int, str]],
+    open_q: str,
+    close_q: str,
+    issues: list[tuple[str, str]],
+    allow_epistolary: bool = False,
+) -> None:
+    epistolary_depth = 0
+    for index, (lineno, line) in enumerate(lines):
+        stripped = line.strip()
+        if epistolary_depth and allow_epistolary:
+            if not (stripped.startswith("*") or stripped.startswith(">")):
+                record(issues, "ERROR", f"[quotes] L{lineno}: multi-line italicized/block quote was not closed")
+                epistolary_depth = 0
+        depth = epistolary_depth
         for char in line:
             if char == open_q:
                 if depth:
@@ -673,43 +977,279 @@ def final_quotes(lines: list[tuple[int, str]], cfg: dict[str, Any], issues: list
                 depth = 0
         if depth:
             following = lines[index + 1][1].lstrip() if index + 1 < len(lines) else ""
-            if not following.startswith(open_q):
-                record(issues, "ERROR", f"[quotes] L{lineno}: quote is not closed in this paragraph")
-    pattern = cfg.get("lost_quote_pattern")
-    if pattern and mode == "cn_curly":
-        lost = re.compile(pattern)
-        for lineno, line in lines:
-            if open_q not in line and lost.search(line):
-                record(issues, "WARN", f"[quotes] L{lineno}: dialogue may have lost its quotes: {line.strip()[:40]}")
+            if following.startswith(open_q):
+                epistolary_depth = 0
+                continue
+            if allow_epistolary and (epistolary_depth or stripped.startswith(f"*{open_q}") or stripped.startswith(">")) and (following.startswith("*") or following.startswith(">")):
+                epistolary_depth = 1
+                continue
+            epistolary_depth = 0
+            record(issues, "ERROR", f"[quotes] L{lineno}: quote is not closed in this paragraph")
+        else:
+            epistolary_depth = 0
+
+
+def final_quotes(lines: list[tuple[int, str]], cfg: dict[str, Any], issues: list[tuple[str, str]]) -> None:
+    mode = cfg["quotes"]
+    if mode == "none":
+        return
+    if mode not in SUPPORTED_QUOTES:
+        raise InputError(f"Unsupported quotes mode {mode!r}; use one of {sorted(SUPPORTED_QUOTES)}")
+
+    if mode in {"cn_curly", "corner"}:
+        open_q, close_q = ("“", "”") if mode == "cn_curly" else ("「", "」")
+        wrong = [(n, s) for n, s in lines if '"' in s]
+        if wrong:
+            record(issues, "ERROR", f"[quotes] L{wrong[0][0]}: straight double quotes on {len(wrong)} line(s); use {open_q} {close_q}")
+        other = "「」『』" if mode == "cn_curly" else "“”"
+        mixed = [(n, s) for n, s in lines if any(c in s for c in other)]
+        if mixed:
+            record(issues, "ERROR", f"[quotes] L{mixed[0][0]}: other quote style on {len(mixed)} line(s); project uses {open_q} {close_q}")
+        half = [(n, s) for n, s in lines if re.search(r"[一-鿿][,?!;:][一-鿿]", s)]
+        if half:
+            record(issues, "WARN", f"[quotes] L{half[0][0]}: half-width punctuation between Chinese characters on {len(half)} line(s)")
+        _check_paired_quotes(lines, open_q, close_q, issues)
+        pattern = cfg.get("lost_quote_pattern")
+        if pattern and mode == "cn_curly":
+            lost = re.compile(pattern)
+            for lineno, line in lines:
+                if open_q not in line and lost.search(line):
+                    record(issues, "WARN", f"[quotes] L{lineno}: dialogue may have lost its quotes: {line.strip()[:40]}")
+        return
+
+    # English quote modes: en_double, en_straight, en_curly, en_single
+    cjk_brackets = [(n, s) for n, s in lines if any(c in s for c in "「」『』《》")]
+    if cjk_brackets:
+        record(issues, "ERROR", f"[quotes] L{cjk_brackets[0][0]}: CJK corner/book quotes on {len(cjk_brackets)} line(s) in English mode")
+
+    if mode == "en_straight":
+        curly_lines = [(n, s) for n, s in lines if "“" in s or "”" in s]
+        if curly_lines:
+            record(issues, "ERROR", f"[quotes] L{curly_lines[0][0]}: curly double quotes on {len(curly_lines)} line(s); project uses straight \" quotes")
+        _check_straight_quotes(lines, issues)
+    elif mode == "en_curly":
+        straight_lines = [(n, s) for n, s in lines if '"' in s]
+        if straight_lines:
+            record(issues, "ERROR", f"[quotes] L{straight_lines[0][0]}: straight double quotes on {len(straight_lines)} line(s); project uses “ ”")
+        _check_paired_quotes(lines, "“", "”", issues, allow_epistolary=True)
+    elif mode == "en_single":
+        double_lines = [(n, s) for n, s in lines if '"' in s or "“" in s or "”" in s]
+        if double_lines:
+            record(issues, "WARN", f"[quotes] L{double_lines[0][0]}: double quotes on {len(double_lines)} line(s) while quotes=en_single")
+        _check_paired_quotes(lines, "‘", "’", issues, allow_epistolary=True)
+    elif mode == "en_double":
+        # Smart Western manuscript mode: enforce pairing on BOTH straight '"' and curly '“...”', and warn if mixed on the same line
+        same_line_mix = [(n, s) for n, s in lines if '"' in s and ("“" in s or "”" in s)]
+        if same_line_mix:
+            record(issues, "ERROR", f"[quotes] L{same_line_mix[0][0]}: mixed straight and curly double quotes on the same line")
+        else:
+            has_straight = any('"' in s for _, s in lines)
+            has_curly = any("“" in s or "”" in s for _, s in lines)
+            if has_straight and has_curly:
+                first_c = next(n for n, s in lines if "“" in s or "”" in s)
+                record(issues, "WARN", f"[quotes] L{first_c}: chapter mixes straight (\") and curly (“ ”) double quotes; standardize if targeting print/EPUB")
+        _check_straight_quotes(lines, issues)
+        _check_paired_quotes(lines, "“", "”", issues, allow_epistolary=True)
+
+
+def final_cjk_leak(lines: list[tuple[int, str]], cfg: dict[str, Any], issues: list[tuple[str, str]]) -> None:
+    if not cfg.get("cjk_leak_check"):
+        return
+    cjk_re = re.compile(r"[㐀-鿿，。！？；：【】《》「」『』、]")
+    for lineno, line in lines:
+        m = cjk_re.search(line)
+        if m:
+            snippet = line[max(0, m.start() - 12):min(len(line), m.end() + 18)].strip()
+            record(issues, "ERROR", f"[cjk-leak] L{lineno}: CJK character/punctuation leaked into English prose: {snippet!r}")
+
+
+# ---------- English Narrative Tense-Drift Engine ----------
+
+EN_DEFINITE_PAST_ANCHOR_RE = re.compile(
+    r"\b(?:"
+    r"(?:\w+\s+)?(?:seconds?|minutes?|hours?|days?|weeks?|months?|years?|decades?)\s+ago"
+    r"|yesterday|last\s+(?:night|week|weekend|month|year|spring|summer|fall|autumn|winter|semester|Tuesday|Monday|Wednesday|Thursday|Friday|Saturday|Sunday)"
+    r"|earlier\s+(?:today|tonight|this\s+morning|this\s+afternoon|this\s+evening|this\s+week)"
+    r"|in\s+(?:high\s+school|middle\s+school|grade\s+school|college|freshman\s+year|sophomore\s+year|20\d\d|19\d\d)"
+    r"|back\s+in\s+[A-Z]\w+"
+    r"|when\s+(?:I|she|he|we|they)\s+(?:was|were|lived|worked|created|went|came|met|started)"
+    r"|before\s+(?:tonight|today|we\s+met|I\s+met)"
+    r"|used\s+to\b|once\s+before\b"
+    r"|for\s+(?:six|five|four|three|two|ten|\d+)\s+(?:months|years)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+EN_COUNTERFACTUAL_RE = re.compile(
+    r"\b(?:if|unless|as\s+if|as\s+though|wish|wishes|wished|wishing|would\s+have|could\s+have|might\s+have|should\s+have)\b",
+    re.IGNORECASE,
+)
+
+EN_PRES_ANCHOR_RE = re.compile(
+    r"\b(?:"
+    r"I\s+(?:am|['’]m|do|don['’]t|have|haven['’]t|can|can['’]t|sit|stand|walk|look|stare|turn|take|pull|push|feel|hear|see|know|think|whisper|say|ask|breathe|swallow|freeze|step|reach|press|hold|lean|watch|shake|nod|grab|open|close)"
+    r"|(?:[Hh]e|[Ss]he|[Ii]t|[A-Z][a-z]{2,15})\s+(?:is|isn['’]t|does|doesn['’]t|has|hasn['’]t|says|murmurs|whispers|asks|replies|looks|stares|turns|stands|sits|walks|steps|reaches|takes|holds|leans|smiles|smirks|nods|pulls|pushes|moves)"
+    r")\b"
+)
+
+EN_PAST_ANCHOR_RE = re.compile(
+    r"\b(?:"
+    r"I\s+(?:was|wasn['’]t|did|didn['’]t|sat|stood|walked|looked|stared|turned|took|pulled|pushed|felt|heard|saw|knew|thought|whispered|said|asked|breathed|swallowed|froze|stepped|reached|pressed|held|leaned|watched|shook|nodded|grabbed|opened|closed)"
+    r"|(?:[Hh]e|[Ss]he|[Ii]t|[A-Z][a-z]{2,15})\s+(?:was|wasn['’]t|did|didn['’]t|said|murmured|whispered|asked|replied|looked|stared|turned|stood|sat|walked|stepped|reached|took|held|leaned|smiled|smirked|nodded|pulled|pushed|moved)"
+    r")\b"
+)
+
+
+def analyze_en_tense(
+    lines: list[tuple[int, str]],
+) -> tuple[int, int, float, list[tuple[int, str, str]]]:
+    """Return (pres_count, past_count, pres_ratio, slip_samples[(lineno, kind, snippet)])."""
+    pres_total = 0
+    past_total = 0
+    para_records: list[tuple[int, int, int, str]] = []
+    in_flashback_block = False
+
+    for lineno, line in lines:
+        s = line.strip()
+        # Skip non-narration formatting lines (headings, dividers, SMS **Name:**, italic system alerts, blockquotes)
+        if (
+            not s
+            or s.startswith(("#", ">", "**"))
+            or s in {"***", "---", "* * *"}
+            or (s.startswith("*") and s.endswith("*") and ":" in s[:35])
+        ):
+            continue
+
+        unq = mask_dialogue(s, "en")
+        # Detect multi-paragraph flashback start (e.g. "Six months ago, ..." or heavy pluperfect memory density >= 2)
+        hads = len(re.findall(r"\bhad\s+[a-z]+", unq, re.IGNORECASE))
+        if re.match(r"^(?:Six|Five|Four|Three|Two|Ten|Twenty|\d+)\s+(?:months|years|weeks)\s+ago\b", s, re.IGNORECASE) or hads >= 2:
+            in_flashback_block = True
+        elif in_flashback_block:
+            # Exit flashback block as soon as dialogue opens at start of line or clear present-tense anchor appears without pluperfect
+            if s.startswith(('"', "“")) or (EN_PRES_ANCHOR_RE.search(unq) and hads == 0):
+                in_flashback_block = False
+
+        if in_flashback_block:
+            continue
+
+        p_pres = 0
+        p_past = 0
+        for sent in re.split(r"(?<=[.!?])\s+", unq):
+            if not sent.strip():
+                continue
+            if EN_DEFINITE_PAST_ANCHOR_RE.search(sent) or EN_COUNTERFACTUAL_RE.search(sent):
+                continue
+            p_pres += len(EN_PRES_ANCHOR_RE.findall(sent))
+            p_past += len(EN_PAST_ANCHOR_RE.findall(sent))
+
+        pres_total += p_pres
+        past_total += p_past
+        if p_pres or p_past:
+            para_records.append((lineno, p_pres, p_past, s))
+
+    denom = pres_total + past_total
+    pres_ratio = (pres_total / denom) if denom > 0 else 1.0
+    dominant = "present" if pres_ratio >= 0.5 else "past"
+    slips: list[tuple[int, str, str]] = []
+    for lineno, p_pres, p_past, raw_line in para_records:
+        if dominant == "present" and p_past > 0 and p_past >= p_pres:
+            slips.append((lineno, "past_in_present", raw_line[:85]))
+        elif dominant == "past" and p_pres > 0 and p_pres >= p_past:
+            slips.append((lineno, "present_in_past", raw_line[:85]))
+
+    return pres_total, past_total, pres_ratio, slips
+
+
+def final_tense(
+    lines: list[tuple[int, str]],
+    cfg: dict[str, Any],
+    chapter_num: int | None,
+    cli_tense: str | None,
+    issues: list[tuple[str, str]],
+) -> tuple[int, int, float]:
+    tense_cfg = cfg.get("tense") or {}
+    mode = (cli_tense or tense_cfg.get("mode") or "off").lower()
+    if mode not in SUPPORTED_TENSE_MODES:
+        raise InputError(f"Unsupported tense mode {mode!r}; use present, past, auto, or off")
+    if cfg.get("lang") != "en" or mode == "off":
+        return (0, 0, 1.0)
+
+    flashback_chapters = set(tense_cfg.get("flashback_chapters") or [])
+    if chapter_num is not None and chapter_num in flashback_chapters:
+        return (0, 0, 1.0)
+
+    pres, past, pres_ratio, slips = analyze_en_tense(lines)
+    total = pres + past
+    if total < 3:
+        return (pres, past, pres_ratio)
+
+    min_ratio = float(tense_cfg.get("min_ratio", 0.80))
+    if mode == "present":
+        if pres_ratio < min_ratio:
+            record(
+                issues,
+                "ERROR",
+                f"[tense] chapter present-tense anchor ratio is {pres_ratio:.1%} ({pres} present vs {past} past), below required {min_ratio:.0%}",
+            )
+        elif tense_cfg.get("paragraph_slip", True):
+            for lineno, _, snippet in slips[:5]:
+                record(issues, "WARN", f"[tense] L{lineno}: unanchored past-tense narration in present-tense chapter: {snippet}")
+    elif mode == "past":
+        past_ratio = 1.0 - pres_ratio
+        if past_ratio < min_ratio:
+            record(
+                issues,
+                "ERROR",
+                f"[tense] chapter past-tense anchor ratio is {past_ratio:.1%} ({past} past vs {pres} present), below required {min_ratio:.0%}",
+            )
+        elif tense_cfg.get("paragraph_slip", True):
+            for lineno, _, snippet in slips[:5]:
+                record(issues, "WARN", f"[tense] L{lineno}: unanchored present-tense narration in past-tense chapter: {snippet}")
+    elif mode == "auto":
+        dominant_ratio = max(pres_ratio, 1.0 - pres_ratio)
+        dominant_label = "present" if pres_ratio >= 0.5 else "past"
+        if dominant_ratio < min_ratio:
+            record(
+                issues,
+                "WARN",
+                f"[tense] mixed narrative tense within chapter ({pres} present vs {past} past; dominant {dominant_label} = {dominant_ratio:.1%})",
+            )
+            for lineno, _, snippet in slips[:3]:
+                record(issues, "WARN", f"[tense] L{lineno}: possible tense drift against {dominant_label} baseline: {snippet}")
+
+    return (pres, past, pres_ratio)
 
 
 def final_banned(
     body: str, lines: list[tuple[int, str]], previous: list[str], cfg: dict[str, Any],
     issues: list[tuple[str, str]],
 ) -> None:
+    lang = cfg.get("lang", "zh")
     disabled = set(cfg.get("disable_banned", []))
     rules = [rule for rule in [*cfg["banned"], *cfg.get("extra_banned", [])]
-             if isinstance(rule, dict) and rule.get("term") not in disabled]
+             if isinstance(rule, dict) and rule.get("term") not in disabled and rule.get("label") not in disabled]
     for rule in rules:
         term = rule.get("term")
         if not isinstance(term, str) or not term:
             raise InputError("Each banned rule needs a nonempty term")
-        regex = re.compile(term if rule.get("regex") else re.escape(term))
+        flags = re.IGNORECASE if (lang == "en" and rule.get("ignore_case", True)) else 0
+        regex = re.compile(term if rule.get("regex") else re.escape(term), flags)
         narration_only = rule.get("where") == "narration"
-        current = regex.findall(mask_dialogue(body) if narration_only else body)
+        current = regex.findall(mask_dialogue(body, lang) if narration_only else body)
         if not current:
             continue
         limit = int(rule.get("max", 0))
         window = int(rule.get("window", 1))
         earlier = previous[-(window - 1):] if window > 1 else []
         total = len(current) + sum(
-            len(regex.findall(mask_dialogue(text) if narration_only else text)) for text in earlier
+            len(regex.findall(mask_dialogue(text, lang) if narration_only else text)) for text in earlier
         )
         if total <= limit:
             continue
         label = rule.get("label") or term
         note = f"; {rule['note']}" if rule.get("note") else ""
-        line = next((n for n, s in lines if regex.search(mask_dialogue(s) if narration_only else s)), 0)
+        line = next((n for n, s in lines if regex.search(mask_dialogue(s, lang) if narration_only else s)), 0)
         scope = f"{total} in the last {window} chapter(s)" if window > 1 else f"{len(current)} time(s)"
         record(issues, rule.get("severity", "ERROR"), f"[phrase] L{line}: “{label}” appears {scope}, limit {limit}{note}")
 
@@ -717,32 +1257,55 @@ def final_banned(
 def final_structure(
     lines: list[tuple[int, str]], body: str, cfg: dict[str, Any], issues: list[tuple[str, str]],
 ) -> None:
-    count = han_count(body)
+    lang = cfg.get("lang", "zh")
+    count = en_word_count(body) if lang == "en" else han_count(body)
+    unit_label = "words" if lang == "en" else "Han characters"
     low, high = cfg["length"].get("min"), cfg["length"].get("max")
     tolerance = float(cfg["length"].get("tolerance") or 0)
     if isinstance(low, int) and count < low:
         severity = "ERROR" if count < low * (1 - tolerance) else "WARN"
-        record(issues, severity, f"[length] {count} Han characters, below minimum {low}")
+        record(issues, severity, f"[length] {count} {unit_label}, below minimum {low}")
     if isinstance(high, int) and count > high:
         severity = "ERROR" if count > high * (1 + tolerance) else "WARN"
-        record(issues, severity, f"[length] {count} Han characters, above maximum {high}")
+        record(issues, severity, f"[length] {count} {unit_label}, above maximum {high}")
     tail = lines[-int(cfg["ending_window_paragraphs"]):] if lines else []
     for pattern in cfg["ending_patterns"]:
         regex = re.compile(pattern)
         for lineno, line in tail:
             if regex.search(line):
-                record(issues, "ERROR", f"[ending] L{lineno}: summary or uplift ending: {line.strip()[:40]}")
+                record(issues, "ERROR", f"[ending] L{lineno}: summary or uplift ending: {line.strip()[:55]}")
     for pattern in cfg["meta_patterns"]:
         regex = re.compile(pattern)
         for lineno, line in lines:
-            if regex.search(line):
-                record(issues, "WARN", f"[meta] L{lineno}: possible planning or audit text in prose: {line.strip()[:40]}")
+            if line.strip() in {"***", "---", "* * *"}:
+                continue
+            target_s = mask_dialogue(line, lang) if "chapter" in pattern.lower() else line
+            if regex.search(target_s):
+                sev = "ERROR" if "chapter" in pattern.lower() and lang == "en" else "WARN"
+                record(issues, sev, f"[meta] L{lineno}: possible planning, fourth-wall, or audit text in prose: {line.strip()[:55]}")
                 break
 
 
 def final_hooks(
     body: str, cfg: dict[str, Any], hook: list[str], catch: list[str], issues: list[tuple[str, str]],
 ) -> None:
+    lang = cfg.get("lang", "zh")
+    if lang == "en":
+        words = body.split()
+        landing_w = int(cfg.get("landing_words") or 120)
+        opening_w = int(cfg.get("opening_words") or 160)
+        if hook:
+            tail_text = " ".join(words[-landing_w:]).lower()
+            missing = [w for w in hook if w.lower() not in tail_text]
+            if missing:
+                record(issues, "ERROR", f"[hook] planned ending is not in the last {landing_w} words: {', '.join(missing)}")
+        if catch:
+            head_text = " ".join(words[:opening_w]).lower()
+            missing = [w for w in catch if w.lower() not in head_text]
+            if missing:
+                record(issues, "ERROR", f"[catch] opening does not pick up the previous ending within {opening_w} words: {', '.join(missing)}")
+        return
+
     plain = re.sub(r"\s+", "", body)
     if hook:
         tail = plain[-int(cfg["landing_chars"]):]
@@ -750,7 +1313,7 @@ def final_hooks(
         if missing:
             record(issues, "ERROR", f"[hook] planned ending is not in the last {cfg['landing_chars']} characters: {'、'.join(missing)}")
     if catch:
-        head = plain[:int(cfg["opening_chars"])]
+        head = plain[:int(cfg["opening_chars"]):]
         missing = [word for word in catch if word not in head]
         if missing:
             record(issues, "ERROR", f"[catch] opening does not pick up the previous ending within {cfg['opening_chars']} characters: {'、'.join(missing)}")
@@ -768,22 +1331,29 @@ def command_final_check(args: argparse.Namespace) -> int:
         raise InputError(f"Chapter file does not exist: {chapter}")
     project = Path(args.project).expanduser().resolve() if args.project else None
     config = Path(args.config).expanduser().resolve() if args.config else None
-    cfg = load_final_config(project, config)
     text = chapter.read_text(encoding="utf-8")
     lines, body = chapter_body(text)
+    cfg = load_final_config(project, config, getattr(args, "lang", None), body)
+    lang = cfg["lang"]
+    chapter_num = getattr(args, "chapter", None) or infer_chapter_number(chapter)
+
     previous = []
     for item in args.previous or []:
         path = Path(item).expanduser().resolve()
         if not path.is_file():
             raise InputError(f"Previous chapter does not exist: {path}")
         previous.append(chapter_body(path.read_text(encoding="utf-8"))[1])
+
     issues: list[tuple[str, str]] = []
     if not body.strip():
         record(issues, "ERROR", "[length] chapter has no prose after the heading")
     final_quotes(lines, cfg, issues)
+    final_cjk_leak(lines, cfg, issues)
+    final_tense(lines, cfg, chapter_num, getattr(args, "tense", None), issues)
     final_banned(body, lines, previous, cfg, issues)
     final_structure(lines, body, cfg, issues)
     final_hooks(body, cfg, split_keywords(args.hook), split_keywords(args.catch), issues)
+
     if project is not None:
         state_path = ledger_paths(project)[1]
         if state_path.is_file():
@@ -791,9 +1361,138 @@ def command_final_check(args: argparse.Namespace) -> int:
             validate_state(state, issues)
             if not any(severity == "ERROR" and "state.json" in message for severity, message in issues):
                 scan_retired_names(body, state, issues)
-    print(f"Final check: {chapter.name}, {han_count(body)} Han characters")
+                scan_state_continuity_rules(body, lines, state, chapter_num, lang, issues)
+
+    if lang == "en":
+        print(f"Final check: {chapter.name}, {en_word_count(body)} words (lang=en)")
+    else:
+        print(f"Final check: {chapter.name}, {han_count(body)} Han characters")
     show_issues(issues)
     return 1 if any(severity == "ERROR" for severity, _ in issues) else 0
+
+
+# ---------- Cross-Volume Series Audit (跨卷连续性与全书终检) ----------
+
+BACKSTAGE_FILE_RE = re.compile(r"^(?:walkthrough|summary|notes|outline|brief|audit|readme)[-_.]", re.IGNORECASE)
+
+
+def discover_series_chapters(project: Path, chapters_dir: str | None, pattern: str | None = None) -> list[Path]:
+    if chapters_dir:
+        cdir = Path(chapters_dir).expanduser()
+        if not cdir.is_absolute():
+            cdir = (project / cdir).resolve()
+    else:
+        for candidate in ("正文", "chapters", "章节", "manuscript"):
+            if (project / candidate).is_dir():
+                cdir = (project / candidate).resolve()
+                break
+        else:
+            cdir = project
+    if not cdir.is_dir():
+        raise InputError(f"Chapters directory does not exist: {cdir}")
+    glob_pat = pattern or "*.md"
+    md_files = [
+        p for p in cdir.glob(glob_pat)
+        if p.is_file() and (pattern is not None or (p.name.lower() != "readme.md" and not BACKSTAGE_FILE_RE.match(p.name)))
+    ]
+    if not md_files:
+        raise InputError(f"No chapter files matching {glob_pat!r} found in {cdir}")
+    md_files.sort(key=lambda p: (infer_chapter_number(p) is None, infer_chapter_number(p) or 0, p.name))
+    return md_files
+
+
+def command_audit_series(args: argparse.Namespace) -> int:
+    project = Path(args.project).expanduser().resolve()
+    if not project.is_dir():
+        raise InputError(f"Project directory does not exist: {project}")
+    config = Path(args.config).expanduser().resolve() if args.config else None
+    chapters = discover_series_chapters(project, args.chapters_dir, getattr(args, "pattern", None))
+
+    first_body = chapter_body(chapters[0].read_text(encoding="utf-8"))[1]
+    cfg = load_final_config(project, config, args.lang, first_body)
+    lang = cfg["lang"]
+
+    state: dict[str, Any] | None = None
+    state_path = ledger_paths(project)[1]
+    series_issues: list[tuple[str, str]] = []
+    if state_path.is_file():
+        state = load_json(state_path)
+        validate_state(state, series_issues)
+
+    history_bodies: list[str] = []
+    total_metric = 0
+    vol_size = max(1, int(args.volume_size or 20))
+    vol_stats: dict[int, list[float]] = {}
+    phrase_totals: dict[str, int] = {}
+
+    disabled = set(cfg.get("disable_banned", []))
+    active_rules = [
+        r for r in [*cfg["banned"], *cfg.get("extra_banned", [])]
+        if isinstance(r, dict) and r.get("term") not in disabled and r.get("label") not in disabled
+    ]
+
+    for idx, ch_path in enumerate(chapters, 1):
+        raw = ch_path.read_text(encoding="utf-8")
+        lines, body = chapter_body(raw)
+        ch_num = infer_chapter_number(ch_path) or idx
+        total_metric += en_word_count(body) if lang == "en" else han_count(body)
+
+        ch_issues: list[tuple[str, str]] = []
+        final_quotes(lines, cfg, ch_issues)
+        final_cjk_leak(lines, cfg, ch_issues)
+        pres, past, p_ratio = final_tense(lines, cfg, ch_num, args.tense, ch_issues)
+        if lang == "en" and (pres + past) >= 4:
+            vol_idx = (idx - 1) // vol_size + 1
+            vol_stats.setdefault(vol_idx, []).append(p_ratio)
+
+        final_banned(body, lines, history_bodies, cfg, ch_issues)
+        final_structure(lines, body, cfg, ch_issues)
+
+        if state is not None:
+            scan_retired_names(body, state, ch_issues)
+            scan_state_continuity_rules(body, lines, state, ch_num, lang, ch_issues)
+
+        # Count book-wide phrase density for summary
+        for rule in active_rules:
+            term = rule["term"]
+            flags = re.IGNORECASE if (lang == "en" and rule.get("ignore_case", True)) else 0
+            rx = re.compile(term if rule.get("regex") else re.escape(term), flags)
+            narration_only = rule.get("where") == "narration"
+            hits = len(rx.findall(mask_dialogue(body, lang) if narration_only else body))
+            if hits:
+                lbl = rule.get("label") or term
+                phrase_totals[lbl] = phrase_totals.get(lbl, 0) + hits
+
+        for sev, msg in ch_issues:
+            if args.errors_only and sev != "ERROR":
+                continue
+            series_issues.append((sev, f"[{ch_path.name}] {msg}"))
+
+        history_bodies.append(body)
+
+    unit_name = "words" if lang == "en" else "Han characters"
+    print(f"Series audit: {len(chapters)} chapter(s), {total_metric:,} {unit_name} (lang={lang})")
+    if lang == "en" and vol_stats:
+        vol_parts = [
+            f"Vol.{v}: {sum(ratios)/len(ratios):.1%} present"
+            for v, ratios in sorted(vol_stats.items())
+        ]
+        print("Tense by volume: " + " | ".join(vol_parts))
+    if phrase_totals:
+        top_phrases = sorted(phrase_totals.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+        print("Tracked phrase totals: " + ", ".join(f"{k}={v}" for k, v in top_phrases))
+
+    max_show = int(args.max_issues or 60)
+    shown = series_issues[:max_show]
+    for severity, message in shown:
+        print(f"{severity}: {message}")
+    if len(series_issues) > max_show:
+        print(f"... ({len(series_issues) - max_show} additional finding(s) omitted; increase --max-issues)")
+
+    errors = sum(sev == "ERROR" for sev, _ in series_issues)
+    warnings = sum(sev == "WARN" for sev, _ in series_issues)
+    print(f"Series audit complete: {errors} error(s), {warnings} warning(s)")
+    return 1 if errors > 0 else 0
 
 
 def register_approved_chapter(sources: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
@@ -888,35 +1587,59 @@ def command_approve(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+
     init = sub.add_parser("init", help="Initialize an optional ledger without overwriting files")
     init.add_argument("project")
     init.add_argument("--new-project", action="store_true", help="Add missing planning document skeletons")
     init.set_defaults(func=command_init)
+
     prepare = sub.add_parser("prepare", help="Prepare a candidate delta after drafting")
     prepare.add_argument("project")
     prepare.add_argument("chapter_file")
     prepare.add_argument("--chapter", type=int, required=True)
     prepare.set_defaults(func=command_prepare)
+
     check = sub.add_parser("check", help="Read-only state and candidate checks")
     check.add_argument("project")
     check.add_argument("--delta")
     check.set_defaults(func=command_check)
+
     final = sub.add_parser(
         "final-check",
-        help="Read-only last gate for one chapter: quotes, stock phrases, ending, length, hook landing",
+        help="Read-only last gate for one chapter: quotes, CJK leaks, tense drift, stock phrases, ending, length, hook landing, continuity rules",
     )
     final.add_argument("chapter_file")
-    final.add_argument("--project", help="Novel project root; reads .novel-master-lab/final-check.json and state names if present")
+    final.add_argument("--project", help="Novel project root; reads .novel-master-lab/final-check.json and state.json if present")
     final.add_argument("--config", help="Extra final-check JSON config, applied after the project config")
+    final.add_argument("--lang", choices=["zh", "en", "auto"], help="Language mode: zh (default), en (English novel mode), or auto")
+    final.add_argument("--tense", choices=["present", "past", "auto", "off"], help="English narrative tense gate: present, past, auto, or off")
+    final.add_argument("--chapter", type=int, help="Explicit chapter number override for chapter-scoped continuity/persona rules")
     final.add_argument("--previous", nargs="*", help="Earlier chapters, oldest first, for multi-chapter phrase limits")
-    final.add_argument("--hook", help="Comma-separated words the planned ending must contain near the end")
-    final.add_argument("--catch", help="Comma-separated words the opening must contain to pick up the previous ending")
+    final.add_argument("--hook", help="Comma-separated words/phrases the planned ending must contain near the end")
+    final.add_argument("--catch", help="Comma-separated words/phrases the opening must contain to pick up the previous ending")
     final.set_defaults(func=command_final_check)
+
+    series = sub.add_parser(
+        "audit-series",
+        help="Read-only cross-volume continuity, tense-drift, quote, and cliché-density audit across all chapters",
+    )
+    series.add_argument("project", help="Novel project root")
+    series.add_argument("--chapters-dir", help="Chapters directory (relative to project or absolute; auto-detects 正文/ or chapters/)")
+    series.add_argument("--pattern", help="Optional glob pattern for chapter files (e.g. 'Ch*.md'); backstage walkthrough/notes files are excluded automatically")
+    series.add_argument("--config", help="Optional final-check JSON config")
+    series.add_argument("--lang", choices=["zh", "en", "auto"], default="auto", help="Language mode (default: auto)")
+    series.add_argument("--tense", choices=["present", "past", "auto", "off"], help="Narrative tense baseline across mainline chapters")
+    series.add_argument("--volume-size", type=int, default=20, help="Chapters per volume bucket for tense summary (default: 20)")
+    series.add_argument("--errors-only", action="store_true", help="Display only ERROR findings in per-chapter output")
+    series.add_argument("--max-issues", type=int, default=60, help="Maximum findings printed before truncation (default: 60)")
+    series.set_defaults(func=command_audit_series)
+
     approve = sub.add_parser("approve", help="Promote a checked candidate after explicit user approval")
     approve.add_argument("project")
     approve.add_argument("--delta", required=True)
     approve.add_argument("--approval-note", required=True)
     approve.set_defaults(func=command_approve)
+
     return parser
 
 
